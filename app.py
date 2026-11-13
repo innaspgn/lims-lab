@@ -7,7 +7,7 @@ from student_logic import (
     reject_sample_logged, correct_department, validate_project_state
 )
 
-st.set_page_config(page_title="LIMS • Бургунди и Мята", layout="wide")
+st.set_page_config(page_title="LIMS • Учёт образцов", layout="wide")
 if "state" not in st.session_state:
     st.session_state["state"] = make_initial_state()
 if "batch_protocol" not in st.session_state:
