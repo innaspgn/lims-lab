@@ -3,8 +3,8 @@ import random
 from io_adapter import save_state, load_state, export_document
 from student_logic import (
     make_initial_state, register_sample, select_samples,
-    prepare_stage_results, change_stage_batch_logged, reject_sample_logged,
-    correct_department, validate_project_state
+    prepare_stage_results, change_stage_batch_logged, change_stage_batch_atomic,
+    reject_sample_logged, correct_department, validate_project_state
 )
 
 st.set_page_config(page_title="LIMS • Бургунди и Мята", layout="wide")
@@ -67,7 +67,23 @@ if st.sidebar.button("Загрузить из team_state.json", use_container_wi
             st.session_state["load_msg"] = "Работа успешно восстановлена."
             st.rerun()
 
-doc_lines = ["РАБОЧИЙ ДОКУМЕНТ ЛАБОРАТОРИИ", "=" * 40, "РЕЕСТР:"]
+st.sidebar.markdown("---")
+st.sidebar.markdown("### Дневник смены")
+cur_note = state.get("extra", {}).get("shift_note", "")
+new_note = st.sidebar.text_area(
+    "Комментарий дежурного",
+    value=cur_note,
+    placeholder="Например: Смена №2, калибровка выполнена...",
+    height=75
+)
+if new_note != cur_note:
+    state.setdefault("extra", {})["shift_note"] = new_note
+
+doc_lines = ["РАБОЧИЙ ДОКУМЕНТ ЛАБОРАТОРИИ", "=" * 40]
+if state.get("extra", {}).get("shift_note"):
+    doc_lines.append(f"ЗАМЕТКА СМЕНЫ: {state['extra']['shift_note']}")
+    doc_lines.append("-" * 40)
+doc_lines.append("РЕЕСТР:")
 doc_lines += [f"- {x['code']} | {x['department']} | {ST_RU.get(x['status'], x['status'])} | {x['reject_reason'] or '—'}" for x in recs]
 doc_lines += ["\nИСТОРИЯ:"] + [f"- [{e.get('event_id','')}] {ACT_RU.get(e.get('action',''), e.get('action',''))} | {e.get('record_id')} | {tr(e.get('details',''))}" for e in history]
 doc_text = "\n".join(doc_lines)
@@ -80,36 +96,13 @@ if st.sidebar.button("Выгрузить work_document.txt", use_container_width
         st.sidebar.error("Ошибка выгрузки.")
 
 st.sidebar.download_button(
-    label="⬇ Скачать отчёт (.txt)",
+    label="Скачать отчёт (.txt)",
     data=doc_text,
     file_name="work_document.txt",
     mime="text/plain",
     use_container_width=True
 )
 # Палитра с картинки: Васильковый (#7e95c4), Салатовый (#b5dca8), Сиреневый (#e8cbf7)
-
-search_q = st.session_state.get("search_id_box", "").strip().upper()
-matched = [r for r in recs if search_q and search_q in r["code"]]
-target_sample = matched[0] if matched else (recs[0] if recs else None)
-
-if target_sample:
-    st_code = target_sample["status"]
-    if st_code == "rejected":
-        temp_lbl, brd_col, bars = "QUARANTINE", "#b91c1c", "|| ||| | ||| ||"
-    elif st_code == "released":
-        temp_lbl, brd_col, bars = "-20°C ARCHIVE", "#4d7c0f", "|||| | || || ||||"
-    else:
-        temp_lbl, brd_col, bars = "+4°C ACTIVE", "#7e95c4", "||| | || ||| | ||"
-
-    st.sidebar.markdown(
-        f"<div style='background:#ffffff;border:2px dashed {brd_col};border-radius:12px;padding:10px 12px;margin-top:8px;font-family:monospace;color:#222f4a'>"
-        f"<div style='font-size:10px;color:#64748b;display:flex;justify-content:space-between'><span>LAB-PASS</span><b style='color:{brd_col}'>{temp_lbl}</b></div>"
-        f"<div style='font-size:16px;font-weight:800;letter-spacing:2px;margin:4px 0'>{bars}</div>"
-        f"<div style='font-size:12px;font-weight:700'>{target_sample['code']} • {target_sample['department']}</div>"
-        f"<div style='font-size:11px;color:#3a4d75'>Статус: {ST_RU.get(st_code, st_code)}</div>"
-        f"</div>",
-        unsafe_allow_html=True
-    )
 
 if cb:
     c_blue, c_green, c_lilac, c_deep = "#18181b", "#d4d4d8", "#e4e4e7", "#27272a"
@@ -238,17 +231,53 @@ with col_left:
     st.markdown("<div class='panel-hdr'><span class='dot'></span> Пульт управления</div>", unsafe_allow_html=True)
     t1, t2, t3, t4 = st.tabs(["Смена этапа", "Исправление участка", "Отбраковка", "Регистрация"])
     with t1:
-        raw_txt = st.text_area("Коды образцов", placeholder="lab001, LAB004, LAB999", height=85)
+        if "stage_codes_input" not in st.session_state:
+            st.session_state["stage_codes_input"] = ""
+
+        active_samples = [r["code"] for r in recs if r["status"] not in ["released", "rejected"]]
+        if active_samples:
+            st.caption("Быстрое добавление активных кодов:")
+            chip_cols = st.columns(min(len(active_samples) + 1, 5))
+            for idx, scode in enumerate(active_samples[:4]):
+                if chip_cols[idx].button(f"+ {scode}", key=f"chip_{scode}", use_container_width=True):
+                    cur_v = st.session_state["stage_codes_input"].strip()
+                    st.session_state["stage_codes_input"] = f"{cur_v}, {scode}" if cur_v else scode
+                    st.rerun()
+            if chip_cols[-1].button("Очистить", key="chip_clear", use_container_width=True):
+                st.session_state["stage_codes_input"] = ""
+                st.rerun()
+
+        raw_txt = st.text_area(
+            "Коды образцов",
+            key="stage_codes_input",
+            placeholder="lab001, LAB004, LAB999",
+            height=85
+        )
+        mode_ru = st.radio(
+            "Режим обработки",
+            ["Частично (по одному)", "Строго («все или ни одного»)"],
+            horizontal=True
+        )
         tgt_ru = st.selectbox("Целевой этап", ["Принят", "Обработан", "Выдан"])
         tgt = RU_ST[tgt_ru]
         c1, c2 = st.columns(2)
-        if c1.button("Проверка", use_container_width=True) and raw_txt.strip():
-            st.session_state["batch_protocol"] = prepare_stage_results(recs, raw_txt, tgt)
-            st.session_state["protocol_title"] = f"Предпросмотр («{tgt_ru}»)"
-        if c2.button("Выполнение", use_container_width=True) and raw_txt.strip():
-            st.session_state["batch_protocol"] = change_stage_batch_logged(state, raw_txt, tgt)
-            st.session_state["protocol_title"] = f"Протокол («{tgt_ru}»)"
-            st.rerun()
+        if c1.button("Проверка", use_container_width=True):
+            if not raw_txt.strip():
+                st.warning("Введите хотя бы один код образца для проверки.")
+            else:
+                st.session_state["batch_protocol"] = prepare_stage_results(recs, raw_txt, tgt)
+                st.session_state["protocol_title"] = f"Предпросмотр («{tgt_ru}»)"
+        if c2.button("Выполнение", use_container_width=True):
+            if not raw_txt.strip():
+                st.warning("Введите хотя бы один код образца перед выполнением.")
+            else:
+                if mode_ru.startswith("Строго"):
+                    res_list = change_stage_batch_atomic(state, raw_txt, tgt)
+                else:
+                    res_list = change_stage_batch_logged(state, raw_txt, tgt)
+                st.session_state["batch_protocol"] = res_list
+                st.session_state["protocol_title"] = f"Протокол • {mode_ru} («{tgt_ru}»)"
+                st.rerun()
         if st.session_state["batch_protocol"]:
             st.markdown(f"**{st.session_state['protocol_title']}**")
             for it in st.session_state["batch_protocol"]:
@@ -256,6 +285,8 @@ with col_left:
                     st.success(f"{it['record_id']}: {tr(it['message'])}")
                 else:
                     st.error(f"{it['record_id']}: {tr(it['message'])}")
+
+
     with t2:
         with st.form("dept_f", clear_on_submit=True):
             ec = st.text_input("Код (только «Зарегистрирован»)")
@@ -302,6 +333,26 @@ with col_right:
     else:
         rows = "".join(f"<tr><td><b>{r['code']}</b></td><td>{r['department']}</td><td><span class='bdg' style='background:{bm[r['status']]};color:{tm[r['status']]}'>{ST_RU[r['status']]}</span></td><td style='color:#6b4c55'>{r['reject_reason'] or '—'}</td></tr>" for r in shown)
         st.markdown(f"<div class='tbl-card'><table class='lims'><thead><tr><th>Код</th><th>Участок</th><th>Статус</th><th>Примечание</th></tr></thead><tbody>{rows}</tbody></table></div>", unsafe_allow_html=True)
+    if ff.strip() and shown:
+        target_sample = shown[0]
+        st_code = target_sample["status"]
+        if st_code == "rejected":
+            temp_lbl, brd_col, bars = "QUARANTINE", "#b91c1c", "|| ||| | ||| ||"
+        elif st_code == "released":
+            temp_lbl, brd_col, bars = "-20°C ARCHIVE", "#4d7c0f", "|||| | || || ||||"
+        else:
+            temp_lbl, brd_col, bars = "+4°C ACTIVE", "#7e95c4", "||| | || ||| | ||"
+
+        st.markdown(
+            f"<div style='background:#ffffff;border:2px dashed {brd_col};border-radius:14px;padding:12px 16px;margin-top:12px;font-family:monospace;color:#222f4a;box-shadow:0 4px 12px rgba(0,0,0,0.04)'>"
+            f"<div style='font-size:10.5px;color:#64748b;display:flex;justify-content:space-between'><span>LAB-PASS</span><b style='color:{brd_col}'>{temp_lbl}</b></div>"
+            f"<div style='font-size:18px;font-weight:800;letter-spacing:3px;margin:6px 0'>{bars}</div>"
+            f"<div style='font-size:13px;font-weight:700'>{target_sample['code']} • {target_sample['department']}</div>"
+            f"<div style='font-size:11.5px;color:#3a4d75;margin-top:2px'>Статус: {ST_RU.get(st_code, st_code)}</div>"
+            f"</div>",
+            unsafe_allow_html=True
+        )
+
         
 
 done_pct = int((sum(1 for r in recs if r["status"] == "released") / len(recs)) * 100) if recs else 0

@@ -271,3 +271,30 @@ def validate_project_state(candidate):
             errors.append(f"{c}: причина должна быть пустой для '{st}'.")
 
     return errors
+def change_stage_batch_atomic(state, raw_text, target_status):
+    """Выполняет групповой переход строго: меняет данные и пишет историю только если допустимы все коды."""
+    codes = parse_sample_codes(raw_text)
+    if not codes:
+        return []
+
+    samples = state["records"]
+    # Сначала проверяем всю группу без изменения данных
+    checks = prepare_stage_results(samples, raw_text, target_status)
+    has_errors = any(not item["ok"] for item in checks)
+
+    # Если есть хотя бы одна ошибка — формируем честный отказ всей группы
+    if has_errors:
+        res = []
+        for item in checks:
+            if item["ok"]:
+                res.append({
+                    "ok": False,
+                    "message": "Не выполнено: в группе есть ошибки",
+                    "record_id": item["record_id"]
+                })
+            else:
+                res.append(item)
+        return res
+
+    # Если ошибок нет — выполняем переход для каждого образца с записью в историю
+    return change_stage_batch_logged(state, raw_text, target_status)
